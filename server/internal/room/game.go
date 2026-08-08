@@ -6,6 +6,7 @@
 package room
 
 import (
+	"math"
 	"sort"
 
 	"soupout-server/internal/proto"
@@ -39,12 +40,12 @@ type GameRoom struct {
 
 	terrSince [4]uint32 // 每玩家地盘 ACK（输入回传的 lastRecvTerritoryTick）
 	terrTick  uint32    // 地盘帧计数（每 2 逻辑 tick 发一帧）
-	keyframeAt uint32   // 上次 0x0C3 全量地盘帧的 tick
+	keyframeAt uint32   // 上次 0x0C3 全量地盘帧的 tick（MaxUint32 = 尚未发过）
 }
 
 // NewGameRoom 创建房间（等待第 4 人触发开局）。
 func NewGameRoom(cfg Config) *GameRoom {
-	return &GameRoom{cfg: cfg}
+	return &GameRoom{cfg: cfg, keyframeAt: math.MaxUint32}
 }
 
 // ---- soup.Room 接口 ----
@@ -190,7 +191,7 @@ func (r *GameRoom) syncTerrTick(ctx *soup.RoomCtx) {
 	r.terrTick++
 	t := r.g.Tick // 帧在 Step 前发出，serverTick = 内容截至的 tick（与 keyframe 语义一致）
 	// 首帧强制 keyframe（tick=0 状态）；此后每 100 tick 一次全量纠偏。
-	if r.keyframeAt == 0 || t-r.keyframeAt >= 100 {
+	if r.keyframeAt == math.MaxUint32 || t-r.keyframeAt >= 100 {
 		r.sendTerritoryKeyframe(ctx, r.g.Tick)
 		r.keyframeAt = t
 		return
