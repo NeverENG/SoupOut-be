@@ -78,7 +78,7 @@ serverTick u32 · stewRemain u32
 
 - **cells 必须升序**：编码以 `prev` 为基准做差值（首元素差值 = 自身），升序是差值 varint 可正确解码的前提（encode.go:204-219）。
 - 变更日志从新到旧（`forEachNewerThan` 从环尾向前），room 层 `groupChanges` 按 owner 分组后对每组 `sort.Slice` 升序（game.go:372-391）。
-- `serverTick` = 地盘变更所属 tick：增量帧在 sim 推进**前**发出（game.go:95），取 `t = r.g.Tick + 1`（game.go:187）；`sinceTick` = 该玩家最近回传的 ACK（`r.terrSince[p]`，game.go:207-208）。
+- `serverTick` = 地盘变更所属 tick：增量帧在 sim 推进**前**发出（game.go:95），取 `t = r.g.Tick`（game.go:191）——帧在 `Step()` 前发出，serverTick = 内容截至的 tick，与 keyframe 及 ACK 契约一致；`sinceTick` = 该玩家最近回传的 ACK（`r.terrSince[p]`，game.go:207-208）。
 - 发送频率：每 2 逻辑 tick 一帧（10Hz，Ch0）（game.go:194）；该玩家无变更则不发送（game.go:204-205）。
 
 ### 2.5 地盘全量 0x0C3（Ch2）

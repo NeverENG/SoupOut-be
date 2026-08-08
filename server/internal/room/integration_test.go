@@ -94,8 +94,6 @@ func startServer(t *testing.T) (path string, cancel context.CancelFunc) {
 	)
 	go func() { _ = srv.Run(ctx) }()
 
-	// SDK 是单 accept 模型：等待监听就绪后直接拨号（探测连接会干扰 accept）。
-	time.Sleep(400 * time.Millisecond)
 	return path, cancel
 }
 
@@ -138,9 +136,19 @@ func TestFullMatchFlow(t *testing.T) {
 	path, cancel := startServer(t)
 	defer cancel()
 
-	conn, err := net.Dial("unix", path)
-	if err != nil {
-		t.Fatal(err)
+	// SDK 单 accept 模型：轮询拨号直到成功；成功即保留该连接作为主连接
+	//（失败关闭的探测连接会被 SDK 视作断线并重新 accept）。
+	var conn net.Conn
+	dialDeadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(dialDeadline) {
+		if c, err := net.Dial("unix", path); err == nil {
+			conn = c
+			break
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatal("SDK UDS 3s 未就绪")
 	}
 	defer conn.Close()
 	e := &fakeEngine{t: t, conn: conn, buf: make([]byte, 64*1024)}

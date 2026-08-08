@@ -68,7 +68,11 @@ func (r *GameRoom) OnLeave(ctx *soup.RoomCtx, p soup.PlayerID, why soup.LeaveRea
 }
 
 func (r *GameRoom) OnResume(ctx *soup.RoomCtx, p soup.PlayerID, gapMS uint32) {
-	// 重连：SDK 会通过 keyframe 全量纠偏，room 侧无需额外处理。
+	// 重连玩家地盘可能陈旧（增量按个人 ACK 补发）：立即全量 keyframe 纠偏。
+	if r.started && !r.ended {
+		r.sendTerritoryKeyframe(ctx, r.g.Tick)
+		r.keyframeAt = r.g.Tick
+	}
 }
 
 func (r *GameRoom) OnInput(ctx *soup.RoomCtx, p soup.PlayerID, seq soup.InputSeq, payload []byte) {
@@ -107,7 +111,7 @@ func (r *GameRoom) Tick(ctx *soup.RoomCtx, tick soup.Tick, dtMS uint32) soup.Out
 }
 
 func (r *GameRoom) EncodeSnapshot(target soup.PlayerID, baseline soup.Baseline, out *soup.Buffer) {
-	// 本轮快照不做增量：全量 body（14B×4+1B，SDK 头 6B 已由框架写）。
+	// 本轮快照不做增量：全量 body（13B×4+1B，SDK 头 6B 已由框架写）。
 	states := r.snapshotStates()
 	proto.EncodeSnapshotBody(proto.BufferWriter{B: out}, states)
 }
@@ -184,7 +188,7 @@ func cellCenterWorld(c [2]int) fixed.Vec2 {
 // 每 100 tick 发一次全量 keyframe（纠偏，Ch2 可靠有序）。
 func (r *GameRoom) syncTerrTick(ctx *soup.RoomCtx) {
 	r.terrTick++
-	t := r.g.Tick + 1 // 地盘变更挂在本 tick（sim 尚未推进）
+	t := r.g.Tick // 帧在 Step 前发出，serverTick = 内容截至的 tick（与 keyframe 语义一致）
 	// 首帧强制 keyframe（tick=0 状态）；此后每 100 tick 一次全量纠偏。
 	if r.keyframeAt == 0 || t-r.keyframeAt >= 100 {
 		r.sendTerritoryKeyframe(ctx, r.g.Tick)
@@ -208,10 +212,6 @@ func (r *GameRoom) syncTerrTick(ctx *soup.RoomCtx) {
 			proto.EncodeTerritoryDelta(proto.BufferWriter{B: b}, t, r.terrSince[p], groupChanges(changes))
 			ctx.Commit(b)
 		}
-	}
-	if t-r.keyframeAt >= 100 {
-		r.sendTerritoryKeyframe(ctx, t)
-		r.keyframeAt = t
 	}
 }
 
@@ -241,10 +241,8 @@ func (r *GameRoom) broadcastEvents(ctx *soup.RoomCtx, events []sim.Event) {
 			})
 			ctx.Commit(b)
 		case sim.EvPalletDown:
-			pl := r.g.Pallets[ev.A-1]
 			b := ctx.BeginBroadcast(soup.ChReliableUnordered, proto.MsgPalletDown)
 			proto.EncodePalletDown(proto.BufferWriter{B: b}, proto.PalletDownMsg{PalletID: ev.A, ByPlayer: ev.B, Tick: ev.Tick})
-			_ = pl
 			ctx.Commit(b)
 		case sim.EvDropSpawn:
 			// 掉落位置由 room 层按确定性规则生成（sim 只发 ID/type 事件）。
