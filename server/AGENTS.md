@@ -27,9 +27,10 @@ SoupOut-be/
                   / baseline 增量 / 重连补全量 / 确定性回放 / 零分配验收（Pong 已含）
 ```
 
-依赖方向：`cmd/server → room → sim → territory → fixed`；`room → proto → fixed`。
-**`territory` 只允许 import `pkg/fixed`（独立可测）。`sim` 不 import `proto`。`proto` 不 import `sim`。`room` 是唯一粘合层。**
-`server` require `github.com/NeverENG/BanNet/soup-sdk-go`（go.mod replace => ../../../BanNet/soup-sdk-go）。
+依赖方向：`cmd/server → lobby → room → sim → territory → fixed`；`room → proto → fixed`。
+`internal/room` 依赖 `sim` / `territory` / `proto` / `soup-sdk-go`（Buffer/Frame/Channel，game.go）；`internal/lobby` 依赖 `room` / `soup-sdk-go`（Gatekeeper 接口，gatekeeper.go）。
+**`territory` 只允许 import `pkg/fixed`（独立可测）。`sim` 不 import `proto`。`proto` 只依赖 `soup-sdk-go`（Buffer）。`room` 是唯一粘合层。**
+`server` require `github.com/NeverENG/BanNet/soup-sdk-go`（go.mod replace => ../../../BanNet/soup-sdk-go；构建默认走 `server/vendor/` 副本，内含 2 处本地修复，见「协议适配」节）。
 
 ## 硬约束（违反即返工，来自 BE0000M05 / T0004M05）
 
@@ -73,16 +74,30 @@ fn main() {
 }
 ```
 
+## 协议适配（W2–3 落地，详见 docs/PROTOCOL_ADAPTATION.md）
+
+T0001 冻结协议经 SDK 保留号 / 头机制落地，wire 与文档口径的差异记录如下（每处标注源文件）：
+
+- **快照（原 0x0C0）走 SDK 保留号 msg=0（ChUnreliable）**：SDK 自动写 6B 头（`snapshotTick u32 · lastProcessedInputSeq u16`），room 的 `EncodeSnapshotBody` 只写 body（`n u8` + 每玩家 13B：playerId·posX·posY·velX·velY·aim·mass·flags·hp）（proto/encode.go:186-202；vendor soup-sdk-go/baseline.go:54-56）。
+- **重连全量（原 0x042 FullState）走 SDK 保留号 msg=1（ChReliableOrdered）**，无 SDK 头；SDK 在 `inResume` 自动触发 `EncodeFullState`（vendor soup-sdk-go/ticker.go:142-146）。
+- **输入（原 0x080）wire 28B = SDK 头 8B（`clientTick u32 · inputSeq u16 · lastRecvSnapshotTick u16`）+ user data 20B**（`frameCount u8 · 3×(moveX·moveY·aim·buttons) · lastRecvTerritoryTick u32`）；SDK 剥 8B 头后 `room.OnInput` 收到 20B，`proto.DecodeInputUserData` 解码（proto/decode.go:78-108）。
+- **0x0C1 TerritoryDelta**：cells 必须升序（差值 varint 前提；变更日志从新到旧，`groupChanges` 排序，room/game.go:372-391）；`serverTick` = 本 tick、`sinceTick` = 客户端回传 ACK。
+- **0x0C3 TerritoryKeyframe**：`serverTick` 语义 = 「截至该 tick 的状态」，开局 keyframe tick=0；客户端必须持续回传最新收到的 keyframe/delta tick 作为 ACK，否则 `DiffSince` 完整性判定失败（since+1 < 环最老 tick）→ 服务器每帧改发全量 keyframe（room/game.go:197-203；territory/diff.go:66-76）。
+- **事件（0x100–0x106）布局不变，Ch3（ChReliableUnordered）广播**（room/game.go:226-269）。
+- **SDK 本地修复（server/vendor/ 内，BanNet 原仓库待同步）**：jitter.go 排序括号（`pend[-1]` 越界）、raw 归还推迟（data race），详见 PROTOCOL_ADAPTATION.md §4。
+- **联调**：`go run ./cmd/server -socket /tmp/soup.sock`（SDK 监听 UDS，引擎拨号）；帧速查表见 PROTOCOL_ADAPTATION.md §5。
+
 ## 里程碑状态（T0004M07）
 
 | 里程碑 | 状态 |
 |---|---|
 | W1 `pkg/fixed` + `internal/territory`（T1–T8） | ✅ 完成 |
+| W1–2 SDK + 引擎联调 | ✅ 已完成：SDK 复用 BanNet（go.mod replace），`cmd/mockengine` 已删 |
 | 框架（Rust 引擎 + Go SDK S1–S4） | ✅ BanNet 完成（Pong/回放/零分配/engineload 压测在案） |
 | `internal/proto`（T0001M02 全部消息编解码） | ✅ 完成（8 测试，Writer 接口化 + 零分配解码） |
 | `internal/sim`（D0001 规则引擎） | ✅ 完成（7 测试对照数值：LUT/伤害矩阵/复活阶梯/溶解速率） |
-| `internal/room` + `internal/lobby` + `cmd/server` | ⬜ 当前主线 |
-| `cmd/botclient` + 端到端（真引擎 + 4 客户端完整局） | ⬜ 需 serve 入口 |
+| W2–3 `internal/room` + `internal/lobby` + `cmd/server` | ✅ 完成（集成测试 `TestFullMatchFlow` 通过 `-race`：4 会话开局 → MatchStart/keyframe → 输入 → 快照/地盘增量/比分；协议适配见下节） |
+| `cmd/botclient` + 端到端（真引擎 + 4 客户端完整局） | ⬜ 下一步（botclient 目录已建，待实现） |
 
 ## 与文档的已知偏差（有意为之）
 
