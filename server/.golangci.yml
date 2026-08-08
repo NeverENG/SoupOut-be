@@ -1,0 +1,23 @@
+# golangci-lint 配置 —— 落实 T0004M05 的确定性 / 零分配约束
+# 本地未安装时可用 `go vet ./...` 近似；CI 中启用本配置。
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+  settings:
+    govet:
+      disable:
+        - fieldalignment # 结构体对齐优化，不强制
+  exclusions:
+    rules:
+      # 测试代码允许打印与分配
+      - path: _test\.go
+        linters: [staticcheck]
+
+formatters:
+  enable:
+    - gofmt

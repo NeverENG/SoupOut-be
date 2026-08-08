@@ -1,0 +1,10 @@
+# Reasonix 工具目录
+.reasonix/
+
+# 运行时产物
+*.sock
+*.log
+server/vendor/**/*.test
+
+# Go 测试二进制
+*.test
