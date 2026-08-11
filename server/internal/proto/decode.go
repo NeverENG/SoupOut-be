@@ -48,7 +48,7 @@ func (r *reader) i8() (int8, bool) {
 	return int8(v), ok
 }
 
-// varint 读取 zigzag LEB128（与 PutVarint 对称）。
+// varint 读取 plain LEB128（T0001 约定「低 7 位 + 续位」，与客户端 read_varint 对称）。
 func (r *reader) varint() (int64, bool) {
 	var u uint64
 	for i := 0; i < 10; i++ {
@@ -58,7 +58,7 @@ func (r *reader) varint() (int64, bool) {
 		}
 		u |= uint64(c&0x7F) << (7 * i)
 		if c&0x80 == 0 {
-			return int64(u>>1) ^ -int64(u&1), true
+			return int64(u), true
 		}
 	}
 	return 0, false
@@ -193,6 +193,9 @@ func DecodeSnapshotBody(body []byte, states []PlayerState) (out []PlayerState, e
 			return
 		}
 		if s.HP, err = mustU8(&r); err != nil {
+			return
+		}
+		if s.AtkCd10, err = mustU8(&r); err != nil {
 			return
 		}
 		out = append(out, s)

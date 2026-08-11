@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"soupout-server/internal/lobby"
+	"soupout-server/internal/adapter"
 
 	"github.com/NeverENG/BanNet/soup-sdk-go"
 )
@@ -30,6 +31,11 @@ func main() {
 		soup.WithTickHz(20),
 		soup.WithSnapshotHz(10),
 		soup.WithGatekeeper(&lobby.Gatekeeper{}),
+		// P0 旧 Godot 客户端适配:输入 30B 帧头由游戏侧 codec 解析,
+		// 快照/全量消息号映射 0x0C0/0x042。正式客户端可去掉这些开关。
+		soup.WithInputCodec(adapter.LegacyInputCodec{}),
+		soup.WithSnapshotMsgID(0x0C0),
+		soup.WithFullStateMsgID(0x042),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

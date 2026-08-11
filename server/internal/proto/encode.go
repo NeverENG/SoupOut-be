@@ -183,9 +183,9 @@ func EncodeFullState(w Writer, m FullState) {
 
 // ---- 同步（S→C） ----
 
-// EncodeSnapshot 0x0C0：serverTick · ackInputSeq · n · n×{playerId · posX · posY · velX · velY · aim · mass · flags · hp}。
+// EncodeSnapshot 0x0C0：serverTick · ackInputSeq · n · n×{playerId · posX · posY · velX · velY · aim · mass · flags · hp · atkCd10}。
 // EncodeSnapshotBody 0x0C0 的 room 内容（SDK 快照头 6B 由框架写）：
-// n · n×{playerId · posX · posY · velX · velY · aim · mass · stateFlags · hp}。
+// n · n×{playerId · posX · posY · velX · velY · aim · mass · stateFlags · hp · atkCd10}。
 func EncodeSnapshotBody(w Writer, states []PlayerState) {
 	w.PutU8(uint8(len(states)))
 	for _, s := range states {
@@ -198,6 +198,7 @@ func EncodeSnapshotBody(w Writer, states []PlayerState) {
 		w.PutU16(s.Mass)
 		w.PutU8(s.StateFlags)
 		w.PutU8(s.HP)
+		w.PutU8(s.AtkCd10)
 	}
 }
 
@@ -212,10 +213,22 @@ func EncodeTerritoryDelta(w Writer, serverTick, sinceTick uint32, groups []Terri
 		w.PutU16(uint16(len(g.Cells)))
 		var prev uint32
 		for _, c := range g.Cells {
-			w.PutVarint(int64(c) - int64(prev)) // 差值（首元素 = 自身）
+			putPlainVarint(w, int64(c)-int64(prev)) // 差值（首元素 = 自身）；T0001 约定非 zigzag
 			prev = c
 		}
 	}
+}
+
+// putPlainVarint 写 T0001 约定的 plain LEB128（低 7 位 + 续位，无 zigzag）。
+// soup.Buffer.PutVarint 是 zigzag（protobuf 风格），与 T0001 文档「低 7 位 + 续位」
+// 不一致，这里按文档实现，保证旧客户端差值解码正确。
+func putPlainVarint(w Writer, v int64) {
+	u := uint64(v)
+	for u >= 0x80 {
+		w.PutU8(byte(u) | 0x80)
+		u >>= 7
+	}
+	w.PutU8(byte(u))
 }
 
 // EncodeScoreTick 0x0C2：serverTick · ratios[4]。

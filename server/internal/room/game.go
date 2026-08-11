@@ -6,6 +6,7 @@
 package room
 
 import (
+	"log"
 	"math"
 	"sort"
 
@@ -38,6 +39,11 @@ type GameRoom struct {
 	started bool
 	ended   bool
 
+	// 大厅状态(P0 最小实现:昵称/选料/ready,房间码固定 "SOUP")。
+	nicknames   [4][proto.NicknameLen]byte
+	ingredients [4]uint8
+	ready       [4]bool
+
 	terrSince [4]uint32 // 每玩家地盘 ACK（输入回传的 lastRecvTerritoryTick）
 	terrTick  uint32    // 地盘帧计数（每 2 逻辑 tick 发一帧）
 	keyframeAt uint32   // 上次 0x0C3 全量地盘帧的 tick（MaxUint32 = 尚未发过）
@@ -56,6 +62,12 @@ func (r *GameRoom) OnJoin(ctx *soup.RoomCtx, p soup.PlayerID) {
 		return
 	}
 	r.joined[p] = true
+	log.Printf("room: player %d joined (joined=%v started=%v)", int(p)+1, r.joined, r.started)
+	// 旧客户端靠 JOIN_RESULT 才知道自己的 player_id,必须在开局前先发。
+	b := ctx.BeginSend(p, soup.ChReliableOrdered, proto.MsgJoinResult)
+	proto.EncodeJoinResult(proto.BufferWriter{B: b}, proto.JoinOK, uint8(int(p)+1))
+	ctx.Commit(b)
+	r.broadcastRoomState(ctx)
 	if r.allJoined() {
 		r.startMatch(ctx)
 	}
@@ -66,6 +78,10 @@ func (r *GameRoom) OnLeave(ctx *soup.RoomCtx, p soup.PlayerID, why soup.LeaveRea
 		return
 	}
 	r.joined[p] = false
+	r.ready[p] = false
+	if !r.started {
+		r.broadcastRoomState(ctx)
+	}
 }
 
 func (r *GameRoom) OnResume(ctx *soup.RoomCtx, p soup.PlayerID, gapMS uint32) {
@@ -93,6 +109,73 @@ func (r *GameRoom) OnInput(ctx *soup.RoomCtx, p soup.PlayerID, seq soup.InputSeq
 	}
 }
 
+// OnMessage 处理 Ch2/Ch3 业务消息(大厅/房间控制)。SDK 已把通道语义分开,
+// 这里不再需要猜测 seq 是输入序号还是消息号。
+func (r *GameRoom) OnMessage(ctx *soup.RoomCtx, p soup.PlayerID, msg soup.MsgID, payload []byte) {
+	if int(p) >= 4 {
+		return
+	}
+	switch msg {
+	case proto.MsgCreateRoom, proto.MsgQuickMatch:
+		if nick, err := proto.DecodeNickname(payload); err == nil {
+			r.nicknames[p] = nick
+		}
+		// 玩家 ID 已在 OnJoin 用 JOIN_RESULT 发过;这里只更新昵称并广播房间状态。
+		// ⚠️ 不能在此回 ROOM_CREATED:最后一名玩家会先收到 MATCH_START,
+		// 再收到 ROOM_CREATED 会把已进局的客户端踢回房间页。
+		r.broadcastRoomState(ctx)
+	case proto.MsgJoinRoom:
+		if _, nick, err := proto.DecodeRoomCodeAndNickname(payload); err == nil {
+			r.nicknames[p] = nick
+		}
+		// JOIN_RESULT 已在 OnJoin 发过,同上不重复回。
+		r.broadcastRoomState(ctx)
+	case proto.MsgSelectIngredient:
+		if v, err := proto.DecodeIngredient(payload); err == nil {
+			r.ingredients[p] = v
+			r.broadcastRoomState(ctx)
+		}
+	case proto.MsgSetReady:
+		if v, err := proto.DecodeReady(payload); err == nil {
+			r.ready[p] = v != 0
+			r.broadcastRoomState(ctx)
+		}
+	case proto.MsgLeaveRoom:
+		r.joined[p] = false
+		r.ready[p] = false
+		r.broadcastRoomState(ctx)
+	}
+}
+
+// roomCode 是 P0 固定房间码(单房间模型;后续大厅实现后改为随机码池)。
+var roomCode = [proto.RoomCodeLen]byte{'S', 'O', 'U', 'P'}
+
+// broadcastRoomState 广播 0x017 房间状态(客户端房间屏的数据源)。
+func (r *GameRoom) broadcastRoomState(ctx *soup.RoomCtx) {
+	players := make([]proto.RoomPlayer, 0, 4)
+	for i := range r.joined {
+		if !r.joined[i] {
+			continue
+		}
+		players = append(players, proto.RoomPlayer{
+			PlayerID:     uint8(i + 1),
+			Nickname:     r.nicknames[i],
+			IngredientID: r.ingredients[i],
+			Ready:        boolToU8(r.ready[i]),
+		})
+	}
+	b := ctx.BeginBroadcast(soup.ChReliableOrdered, proto.MsgRoomState)
+	proto.EncodeRoomState(proto.BufferWriter{B: b}, roomCode, players)
+	ctx.Commit(b)
+}
+
+func boolToU8(v bool) uint8 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func (r *GameRoom) Tick(ctx *soup.RoomCtx, tick soup.Tick, dtMS uint32) soup.Outcome {
 	if !r.started || r.ended {
 		return soup.Continue
@@ -112,12 +195,19 @@ func (r *GameRoom) Tick(ctx *soup.RoomCtx, tick soup.Tick, dtMS uint32) soup.Out
 }
 
 func (r *GameRoom) EncodeSnapshot(target soup.PlayerID, baseline soup.Baseline, out *soup.Buffer) {
+	// 开局前(玩家未到齐)不产生快照:SDK 仍会写 6B 头,客户端按空包丢弃。
+	if r.g == nil || !r.started {
+		return
+	}
 	// 本轮快照不做增量：全量 body（13B×4+1B，SDK 头 6B 已由框架写）。
 	states := r.snapshotStates()
 	proto.EncodeSnapshotBody(proto.BufferWriter{B: out}, states)
 }
 
 func (r *GameRoom) EncodeFullState(target soup.PlayerID, out *soup.Buffer) {
+	if r.g == nil || !r.started {
+		return
+	}
 	g := r.g
 	proto.EncodeFullState(proto.BufferWriter{B: out}, proto.FullState{
 		ServerTick: g.Tick,
@@ -142,6 +232,7 @@ func (r *GameRoom) allJoined() bool {
 }
 
 func (r *GameRoom) startMatch(ctx *soup.RoomCtx) {
+	log.Printf("room: start match")
 	w, h := r.cfg.GridW, r.cfg.GridH
 	field := territory.New(w, h, territory.Circle{R: 48})
 	for i := 0; i < 4; i++ {
@@ -316,6 +407,7 @@ func (r *GameRoom) snapshotStates() []proto.PlayerState {
 			Mass:       uint16(p.Mass.Mul(fixed.F(100)).ToInt()),
 			StateFlags: stateFlags(g, i),
 			HP:         uint8(p.HP),
+			AtkCd10:    uint8(p.AttackCDMS / 10),
 		})
 	}
 	return states

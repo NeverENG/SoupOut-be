@@ -19,7 +19,7 @@ func (w *tb) PutVarint(v int64) { w.b = appendVarint(w.b, v) }
 func (w *tb) PutRaw(p []byte)   { w.b = append(w.b, p...) }
 
 func appendVarint(b []byte, v int64) []byte {
-	u := uint64(v)<<1 ^ uint64(v>>63)
+	u := uint64(v) // plain LEB128(T0001 约定,与客户端 read_varint 对称)
 	for u >= 0x80 {
 		b = append(b, byte(u)|0x80)
 		u >>= 7
@@ -71,8 +71,8 @@ func TestDecodePlayerInput(t *testing.T) {
 }
 func TestEncodeSnapshotLayout(t *testing.T) {
 	states := []PlayerState{
-		{PlayerID: 1, PosX: 100, PosY: 200, VelX: 5, VelY: -3, AimAngle: 65535, Mass: 1000, StateFlags: FlagCharging, HP: 80},
-		{PlayerID: 2, PosX: 300, PosY: 400, Mass: 1200, HP: 100},
+		{PlayerID: 1, PosX: 100, PosY: 200, VelX: 5, VelY: -3, AimAngle: 65535, Mass: 1000, StateFlags: FlagCharging, HP: 80, AtkCd10: 25},
+		{PlayerID: 2, PosX: 300, PosY: 400, Mass: 1200, HP: 100, AtkCd10: 0},
 	}
 	var w tb
 	EncodeSnapshotBody(&w, states)
@@ -87,7 +87,7 @@ func TestEncodeSnapshotLayout(t *testing.T) {
 		want = append(want, byte(s.VelX), byte(s.VelY))
 		want = appendU16(want, s.AimAngle)
 		want = appendU16(want, s.Mass)
-		want = append(want, s.StateFlags, s.HP)
+		want = append(want, s.StateFlags, s.HP, s.AtkCd10)
 	}
 	if !bytes.Equal(w.b, want) {
 		t.Fatalf("snapshot bytes mismatch:\n got %x\nwant %x", w.b, want)

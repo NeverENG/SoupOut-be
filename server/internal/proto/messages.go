@@ -119,6 +119,7 @@ type PlayerState struct {
 	Mass       uint16 // 由面积派生，服务器算好下发
 	StateFlags uint8
 	HP         uint8
+	AtkCd10    uint8 // 攻击冷却剩余（单位 10ms），客户端冷却条用
 }
 
 // StateFlags 位定义（0x0C0）。

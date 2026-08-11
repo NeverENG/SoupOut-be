@@ -97,7 +97,8 @@ T0001 冻结协议经 SDK 保留号 / 头机制落地，wire 与文档口径的�
 | `internal/proto`（T0001M02 全部消息编解码） | ✅ 完成（8 测试，Writer 接口化 + 零分配解码） |
 | `internal/sim`（D0001 规则引擎） | ✅ 完成（7 测试对照数值：LUT/伤害矩阵/复活阶梯/溶解速率） |
 | W2–3 `internal/room` + `internal/lobby` + `cmd/server` | ✅ 完成（集成测试 `TestFullMatchFlow` 通过 `-race`：4 会话开局 → MatchStart/keyframe → 输入 → 快照/地盘增量/比分；协议适配见下节） |
-| `cmd/botclient` + 端到端（真引擎 + 4 客户端完整局） | ⬜ 下一步（botclient 目录已建，待实现） |
+| 端到端（真引擎 + Go 逻辑服 + 4 个 Godot 客户端完整局） | ✅ 完成（BanNet 增加 legacy 兼容模式 + `examples/serve`；本机 4 客户端进锅收快照通过，见 `docs/LOCAL_E2E.md`） |
+| `cmd/botclient`（headless 假客户端） | ⬜ 可选（已有 4 客户端探针覆盖） |
 
 ## 与文档的已知偏差（有意为之）
 
