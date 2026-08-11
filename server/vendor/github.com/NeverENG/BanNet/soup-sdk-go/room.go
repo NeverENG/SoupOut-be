@@ -26,6 +26,11 @@ type Room interface {
 	// 必须立即解码进自己预分配的结构,不得持有该切片。
 	OnInput(ctx *RoomCtx, p PlayerID, seq InputSeq, payload []byte)
 
+	// OnMessage 交付一条 Ch2/Ch3 业务消息(大厅/房间控制/事件上行)。
+	// 与 OnInput 分开,避免把 msg id 塞进 InputSeq 造成的歧义。
+	// payload 是 SDK 的复用缓冲,返回后即失效,不得持有。
+	OnMessage(ctx *RoomCtx, p PlayerID, msg MsgID, payload []byte)
+
 	// Tick 定频推进一步。dtMS 恒等于 1000/TickHz,与墙钟无关。
 	Tick(ctx *RoomCtx, tick Tick, dtMS uint32) Outcome
 

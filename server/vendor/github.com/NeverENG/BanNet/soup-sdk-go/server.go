@@ -37,6 +37,15 @@ type Config struct {
 	MaxRooms int
 	// BudgetKbpsPerClient 是单客户端带宽预算 kbps(S3 降级生效,默认 24)。
 	BudgetKbpsPerClient int
+	// InputCodec 把 Ch1 输入帧解析为框架字段 + user data。
+	// nil 时使用 canonical(8B 头);不同客户端布局由游戏注入自己的 codec。
+	InputCodec InputCodec
+	// SnapshotMsgID 快照下行使用的消息号(默认 SDK 保留号 0;
+	// 旧客户端适配时映射为 0x0C0)。
+	SnapshotMsgID MsgID
+	// FullStateMsgID 重连全量使用的消息号(默认 SDK 保留号 1;
+	// 旧客户端适配时映射为 0x042)。
+	FullStateMsgID MsgID
 	// Gatekeeper 是鉴权/路由/建房工厂,必填。
 	Gatekeeper Gatekeeper
 	// ReplayOut 是回放录制文件路径;非空时把交付的输入(含 seed/tickHz)
@@ -102,6 +111,9 @@ func NewServer(opts ...Option) *Server {
 	}
 	if cfg.BudgetKbpsPerClient <= 0 {
 		cfg.BudgetKbpsPerClient = 24
+	}
+	if cfg.InputCodec == nil {
+		cfg.InputCodec = canonicalInputCodec{}
 	}
 	s := &Server{
 		cfg:           cfg,

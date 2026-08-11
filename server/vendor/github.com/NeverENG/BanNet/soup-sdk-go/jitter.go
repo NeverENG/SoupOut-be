@@ -1,7 +1,5 @@
 package soup
 
-import "encoding/binary"
-
 // 本文件实现输入抖动缓冲与去重(规格书 T0003M04)。
 //
 // 抖动缓冲:
@@ -153,14 +151,12 @@ func (r *room) handleCh1Input(ev inEvent) {
 		r.srv.readPool.Put(ev.raw)
 		return
 	}
-	if len(ev.payload) < inputHeaderLen {
+	clientTick, seq, lastSnap, user, err := r.srv.cfg.inputCodecOrDefault().Decode(ev.payload)
+	if err != nil {
 		r.srv.readPool.Put(ev.raw)
 		return
 	}
-	clientTick := binary.LittleEndian.Uint32(ev.payload[0:4])
-	seq := InputSeq(binary.LittleEndian.Uint16(ev.payload[4:6]))
-	st.lastRecvSnap = Tick(binary.LittleEndian.Uint16(ev.payload[6:8]))
-	user := ev.payload[inputHeaderLen:]
+	st.lastRecvSnap = lastSnap
 
 	// 每 tick 动态调整深度(按 RTT 抖动,2~5 tick)。
 	st.jdepth = jitterDepth(r.srv.cfg.JitterBufferTicks, st.rtt)

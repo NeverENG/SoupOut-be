@@ -139,7 +139,7 @@ func (r *room) handleEvent(ev inEvent) {
 		st.jbuf = st.jbuf[:0]
 		st.lastSeq = 0
 		st.hasInput = false
-		b := r.ctx.BeginSend(ev.player, ChReliableOrdered, MsgFullState)
+		b := r.ctx.BeginSend(ev.player, ChReliableOrdered, r.srv.cfg.FullStateMsgID)
 		r.impl.EncodeFullState(ev.player, b)
 		r.ctx.Commit(b)
 		r.flushOutbox()
@@ -154,11 +154,11 @@ func (r *room) handleEvent(ev inEvent) {
 		if _, ok := r.players[ev.player]; !ok {
 			return
 		}
-		if ev.raw != nil {
-			defer r.srv.readPool.Put(ev.raw)
-		}
 		// ch=2/3 业务事件:直接交付(读缓冲由上面的 defer 归还)。
-		r.impl.OnInput(r.ctx, ev.player, InputSeq(ev.msg), ev.payload)
+		r.impl.OnMessage(r.ctx, ev.player, ev.msg, ev.payload)
+		if ev.raw != nil {
+			r.srv.readPool.Put(ev.raw)
+		}
 
 	case inStats:
 		if st, ok := r.players[ev.player]; ok {

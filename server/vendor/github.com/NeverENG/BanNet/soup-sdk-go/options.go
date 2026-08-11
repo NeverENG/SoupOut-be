@@ -56,6 +56,23 @@ func WithReplayOut(path string) Option {
 	return func(c *Config) { c.ReplayOut = path }
 }
 
+// WithInputCodec 注入游戏自定义的 Ch1 输入解析器。
+// 框架不知道游戏客户端的输入字节布局,由游戏侧实现 InputCodec。
+func WithInputCodec(codec InputCodec) Option {
+	return func(c *Config) { c.InputCodec = codec }
+}
+
+// WithSnapshotMsgID 设置快照下行使用的消息号(默认 SDK 保留号 0)。
+// 某些既有客户端占用 0x0C0,游戏侧可在此映射。
+func WithSnapshotMsgID(id MsgID) Option {
+	return func(c *Config) { c.SnapshotMsgID = id }
+}
+
+// WithFullStateMsgID 设置重连全量使用的消息号(默认 SDK 保留号 1)。
+func WithFullStateMsgID(id MsgID) Option {
+	return func(c *Config) { c.FullStateMsgID = id }
+}
+
 // WithConfig 用一份完整 Config 整体覆盖配置(与其它 Option 混用时,
 // 按调用顺序,后者覆盖前者)。
 func WithConfig(cfg Config) Option {
@@ -72,5 +89,7 @@ func defaultConfig() Config {
 		BaselineRingSize:      32,
 		MaxRooms:              1024,
 		BudgetKbpsPerClient:   24,
+		SnapshotMsgID:         MsgSnapshot,
+		FullStateMsgID:        MsgFullState,
 	}
 }

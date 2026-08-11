@@ -50,7 +50,7 @@ func (r *room) scheduleSnapshots() {
 	forceKey := r.srv.cfg.KeyframeIntervalTicks > 0 &&
 		uint32(r.tick)%uint32(r.srv.cfg.KeyframeIntervalTicks) == 0
 	for p, st := range r.players {
-		b := r.ctx.BeginSend(p, ChUnreliable, MsgSnapshot)
+		b := r.ctx.BeginSend(p, ChUnreliable, r.srv.cfg.SnapshotMsgID)
 		// SDK 快照头:snapshotTick + lastProcessedInputSeq(客户端据此回传)。
 		b.PutU32(uint32(r.tick))
 		b.PutU16(uint16(st.lastSeq))
