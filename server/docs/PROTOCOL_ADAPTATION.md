@@ -98,6 +98,37 @@ serverTick u32 · stewRemain u32
 - 通道：全部 **ChReliableUnordered(3)** 广播（game.go:226-269 `broadcastEvents`；messages.go:63-64 `ChannelOf` 0x100–0x13F 段位）。
 - sim 只输出 `sim.Event`（不 import proto），由 room 层转换（sim/game.go:20-39；game.go:226-269）。
 
+### 2.7 数值量化（T0001M01F03，room/game.go 的 `quantPos/quantVel/quantAngle`）
+
+| 字段 | 线上格式 | 换算 | 出现在 |
+|---|---|---|---|
+| posX/posY/spawnX/spawnY | `u16` | 世界坐标 × **64**（值域 0..3072） | 0x0C0 / 0x042 / 0x040 / 0x101 |
+| velX/velY | `i8` | 速度（**单位/秒**）× 16，饱和到 ±127 | 0x0C0 |
+| aimAngle | `u16` | 弧度 / 2π × 65536 | 0x0C0 / 0x042 |
+| mass | `u16` | **面积万分比 0..10000**（= `field.Ratios()`） | 0x0C0 / 0x042 |
+
+- `mass` 不是「质量」而是面积万分比：客户端 `match_state.area_permyriad_of()` 把该字段直接当万分比用
+  （T0001M02F05「由面积派生、服务器算好下发，客户端不重算」）。sim 内部的 `Player.Mass` 是另一套口径，不上线。
+- ⚠️ **速度口径与 T0001 文档不一致**：T0001M01F03 写「`i8` 定点 1/16 单位/**tick**」，
+  但客户端 `src/core/fixed.gd` / `src/core/sim.gd` 按「1/16 单位/**秒**」解
+  （`vel * POS_SCALE / (VEL_SCALE * TICK_HZ)`），D0001M02 主属性表的移速列也是 单位/s。
+  **实现取客户端口径**（i8 覆盖 ±7.9 单位/s > 最大移速 6）。要么改文档、要么改两端，别再各写一套。
+- 格坐标 → 世界坐标：格边长 0.5 单位（96 格 ↔ 48 单位），`cellCenterWorld = (2c+1)/4`。
+
+### 2.8 Ch2 分片（下行大消息，以引擎实现为准）
+
+0x0C3 keyframe 常见 1100~1200B，超过引擎分片阈值 `FRAGMENT_THRESHOLD=1100` 会被切片：
+
+```
+frame body = [group_id u16][first_seq u16][frag_no u8][frag_total u8][chunk]   ← 6B 头
+datagram flags |= FLAG_FRAGMENT(0x01)
+```
+
+- 来源：`BanNet/src/reliable/fragment.rs`、`BanNet/src/session/table.rs:968-999`。T0002M03F03 把格式留白。
+- 每个分片是**独立可靠帧**（独立 seq / ack / 重传）→ 接收端**每片都要参与 ack 记账**，
+  否则引擎重传队列不裁剪、RTO 超限断连。
+- 客户端侧实现：`SoupOut-fe/src/net/udp_transport.gd`（收发两侧 6B 头）+ `reassembly.gd`（`MAX_FRAG_CNT=64`）。
+
 ## 3. 地盘 ACK 与 DiffSince 完整性判定（0x0C3 回退链路）
 
 ```

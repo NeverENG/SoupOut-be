@@ -8,6 +8,7 @@ package room
 import (
 	"log"
 	"math"
+	"os"
 	"sort"
 
 	"soupout-server/internal/proto"
@@ -47,7 +48,13 @@ type GameRoom struct {
 	terrSince [4]uint32 // 每玩家地盘 ACK（输入回传的 lastRecvTerritoryTick）
 	terrTick  uint32    // 地盘帧计数（每 2 逻辑 tick 发一帧）
 	keyframeAt uint32   // 上次 0x0C3 全量地盘帧的 tick（MaxUint32 = 尚未发过）
+
+	dbgInputs [4]int // SOUP_DEBUG 联调计数：收到的输入帧数
 }
+
+// debugOn 打开联调日志（输入到达 / 地盘帧发送 / 位置推进）。
+// 只在 SOUP_DEBUG=1 时输出，正常运行零开销之外零噪音。
+var debugOn = os.Getenv("SOUP_DEBUG") == "1"
 
 // NewGameRoom 创建房间（等待第 4 人触发开局）。
 func NewGameRoom(cfg Config) *GameRoom {
@@ -96,7 +103,19 @@ func (r *GameRoom) OnInput(ctx *soup.RoomCtx, p soup.PlayerID, seq soup.InputSeq
 	if r.started && !r.ended && int(p) < 4 {
 		in, err := proto.DecodeInputUserData(payload)
 		if err != nil {
+			if debugOn {
+				log.Printf("dbg: OnInput p%d 解码失败 len=%d err=%v", int(p)+1, len(payload), err)
+			}
 			return // 坏帧丢弃（防注入）
+		}
+		if debugOn {
+			r.dbgInputs[p]++
+			if r.dbgInputs[p] <= 3 || r.dbgInputs[p]%100 == 0 {
+				log.Printf("dbg: OnInput p%d #%d seq=%d frames=%d move=(%d,%d) btn=%d terrAck=%d",
+					int(p)+1, r.dbgInputs[p], int(seq), in.FrameCount,
+					in.Frames[0].MoveX, in.Frames[0].MoveY, in.Frames[0].Buttons,
+					in.LastRecvTerritoryTick)
+			}
 		}
 		r.terrSince[p] = in.LastRecvTerritoryTick
 		r.g.SetInput(uint8(int(p)+1), sim.Input{
@@ -186,6 +205,17 @@ func (r *GameRoom) Tick(ctx *soup.RoomCtx, tick soup.Tick, dtMS uint32) soup.Out
 	r.broadcastEvents(ctx, events)
 	r.broadcastScore(ctx)
 
+	if debugOn && r.g.Tick%40 == 0 {
+		log.Printf("dbg: tick=%d pos=[(%d,%d) (%d,%d) (%d,%d) (%d,%d)] cells=[%d %d %d %d] inputs=%v",
+			r.g.Tick,
+			r.g.Players[0].Pos.X, r.g.Players[0].Pos.Y,
+			r.g.Players[1].Pos.X, r.g.Players[1].Pos.Y,
+			r.g.Players[2].Pos.X, r.g.Players[2].Pos.Y,
+			r.g.Players[3].Pos.X, r.g.Players[3].Pos.Y,
+			r.field.Area(1), r.field.Area(2), r.field.Area(3), r.field.Area(4),
+			r.dbgInputs)
+	}
+
 	if r.g.Result.Ended {
 		r.ended = true
 		r.broadcastMatchEnd(ctx)
@@ -256,22 +286,59 @@ func (r *GameRoom) startMatch(ctx *soup.RoomCtx) {
 func (r *GameRoom) matchPlayers() []proto.MatchPlayer {
 	players := make([]proto.MatchPlayer, 4)
 	for i := range players {
+		spawn := cellCenterWorld(spawnCells[i]) // 与 sim.AddPlayer 同一来源，两处不能各算一遍
 		players[i] = proto.MatchPlayer{
 			PlayerID: uint8(i + 1),
-			Nickname: [16]byte{},
-			SpawnX:   uint16(spawnCells[i][0]*100 + 50),
-			SpawnY:   uint16(spawnCells[i][1]*100 + 50),
+			Nickname: r.nicknames[i],
+			SpawnX:   quantPos(spawn.X),
+			SpawnY:   quantPos(spawn.Y),
 		}
 	}
 	return players
 }
 
-// cellCenterWorld 把出生格坐标换算为世界坐标（格中心，格单位 0..96）。
+// cellCenterWorld 把格坐标转成格心的世界坐标。
+// 格边长 0.5 世界单位（96 格 ↔ 48 单位，T0001M01F03）→ world = (cell + 0.5) / 2 = (2c+1)/4。
+// 曾误写作 /2（把格当成世界单位），导致 2/3/4 号玩家出生在世界外被 clampWorld 夹到角上。
 func cellCenterWorld(c [2]int) fixed.Vec2 {
 	return fixed.Vec2{
-		X: fixed.I(int32(c[0]*2 + 1)).Div(fixed.I(2)),
-		Y: fixed.I(int32(c[1]*2 + 1)).Div(fixed.I(2)),
+		X: fixed.I(int32(c[0]*2 + 1)).Div(fixed.I(4)),
+		Y: fixed.I(int32(c[1]*2 + 1)).Div(fixed.I(4)),
 	}
+}
+
+// ---- 线上量化（T0001M01F03：位置 u16 定点 1/64、角度 u16 映射 0..2π、速度 i8 定点 1/16） ----
+
+// quantPos 世界坐标（Q22.10）→ u16 定点 1/64 单位，值域 0..3072。
+func quantPos(v fixed.F) uint16 {
+	q := (int64(v) * 64) >> fixed.FracBits
+	if q < 0 {
+		q = 0
+	}
+	if q > 0xFFFF {
+		q = 0xFFFF
+	}
+	return uint16(q)
+}
+
+// quantVel 速度（Q22.10，单位/秒）→ i8 定点 1/16。
+// ⚠️ 口径偏差：T0001M01F03 写的是「1/16 单位/**tick**」，但客户端 src/core/sim.gd
+// 按「1/16 单位/**秒**」解（`vel * POS_SCALE / (VEL_SCALE * TICK_HZ)`），
+// D0001M02 主属性表的移速列也是 单位/s。以客户端口径为准（i8 值域 ±7.9 单位/s 覆盖最大移速 6）。
+func quantVel(v fixed.F) int8 {
+	q := (int64(v) * 16) >> fixed.FracBits
+	if q < -128 {
+		q = -128
+	}
+	if q > 127 {
+		q = 127
+	}
+	return int8(q)
+}
+
+// quantAngle 弧度（Q22.10）→ u16，0..65535 映射 0..2π。
+func quantAngle(a fixed.F) uint16 {
+	return uint16((int64(a) * 65536 / int64(fixed.TwoPi)) & 0xFFFF)
 }
 
 // ---- tick 产出 ----
@@ -302,6 +369,10 @@ func (r *GameRoom) syncTerrTick(ctx *soup.RoomCtx) {
 			}
 			b := ctx.BeginSend(soup.PlayerID(p), soup.ChUnreliable, proto.MsgTerritoryDelta)
 			proto.EncodeTerritoryDelta(proto.BufferWriter{B: b}, t, r.terrSince[p], groupChanges(changes))
+			if debugOn && r.terrTick%40 == 1 {
+				log.Printf("dbg: 0x0C1 delta → p%d tick=%d since=%d changes=%d payload=%dB",
+					p+1, t, r.terrSince[p], len(changes), b.Len())
+			}
 			ctx.Commit(b)
 		}
 	}
@@ -310,8 +381,12 @@ func (r *GameRoom) syncTerrTick(ctx *soup.RoomCtx) {
 // sendTerritoryKeyframe 发送 0x0C3 全量地盘帧（RLE，serverTick 由调用方指定）。
 func (r *GameRoom) sendTerritoryKeyframe(ctx *soup.RoomCtx, tick uint32) {
 	b := ctx.BeginBroadcast(soup.ChReliableOrdered, proto.MsgTerritoryKeyframe)
-	proto.EncodeTerritoryKeyframeHeader(proto.BufferWriter{B: b}, tick, uint16(r.field.CountRLE()))
+	runs := r.field.CountRLE()
+	proto.EncodeTerritoryKeyframeHeader(proto.BufferWriter{B: b}, tick, uint16(runs))
 	r.field.EncodeRLE(proto.BufferWriter{B: b})
+	if debugOn {
+		log.Printf("dbg: 0x0C3 keyframe tick=%d runs=%d payload=%dB", tick, runs, b.Len())
+	}
 	ctx.Commit(b)
 }
 
@@ -327,8 +402,8 @@ func (r *GameRoom) broadcastEvents(ctx *soup.RoomCtx, events []sim.Event) {
 			b := ctx.BeginBroadcast(soup.ChReliableUnordered, proto.MsgPlayerRespawn)
 			proto.EncodePlayerRespawn(proto.BufferWriter{B: b}, proto.PlayerRespawnMsg{
 				PlayerID: ev.A,
-				PosX:     uint16(p.Pos.X.Mul(fixed.F(100)).ToInt()),
-				PosY:     uint16(p.Pos.Y.Mul(fixed.F(100)).ToInt()),
+				PosX:     quantPos(p.Pos.X),
+				PosY:     quantPos(p.Pos.Y),
 				Tick:     ev.Tick,
 			})
 			ctx.Commit(b)
@@ -395,16 +470,19 @@ func (r *GameRoom) broadcastMatchEnd(ctx *soup.RoomCtx) {
 func (r *GameRoom) snapshotStates() []proto.PlayerState {
 	states := make([]proto.PlayerState, 0, 4)
 	g := r.g
+	// mass 字段 = 面积万分比（客户端 match_state.area_permyriad_of 直接当万分比用，
+	// T0001M02F05「由面积派生、服务器算好下发」）。
+	ratios := r.field.Ratios()
 	for i := range g.Players {
 		p := &g.Players[i]
 		states = append(states, proto.PlayerState{
 			PlayerID:   uint8(i + 1),
-			PosX:       uint16(p.Pos.X.Mul(fixed.F(100)).ToInt()),
-			PosY:       uint16(p.Pos.Y.Mul(fixed.F(100)).ToInt()),
-			VelX:       int8(p.Vel.X.Mul(fixed.F(100)).ToInt()),
-			VelY:       int8(p.Vel.Y.Mul(fixed.F(100)).ToInt()),
-			AimAngle:   uint16(p.Aim.Mul(fixed.F(65536)).Div(fixed.TwoPi).ToInt()),
-			Mass:       uint16(p.Mass.Mul(fixed.F(100)).ToInt()),
+			PosX:       quantPos(p.Pos.X),
+			PosY:       quantPos(p.Pos.Y),
+			VelX:       quantVel(p.Vel.X),
+			VelY:       quantVel(p.Vel.Y),
+			AimAngle:   quantAngle(p.Aim),
+			Mass:       ratios[i],
 			StateFlags: stateFlags(g, i),
 			HP:         uint8(p.HP),
 			AtkCd10:    uint8(p.AttackCDMS / 10),
@@ -416,14 +494,15 @@ func (r *GameRoom) snapshotStates() []proto.PlayerState {
 func (r *GameRoom) fullStates() []proto.FullPlayer {
 	fs := make([]proto.FullPlayer, 0, 4)
 	g := r.g
+	ratios := r.field.Ratios()
 	for i := range g.Players {
 		p := &g.Players[i]
 		fs = append(fs, proto.FullPlayer{
 			PlayerID:    uint8(i + 1),
-			PosX:        uint16(p.Pos.X.Mul(fixed.F(100)).ToInt()),
-			PosY:        uint16(p.Pos.Y.Mul(fixed.F(100)).ToInt()),
-			Aim:         uint16(p.Aim.Mul(fixed.F(65536)).Div(fixed.TwoPi).ToInt()),
-			Mass:        uint16(p.Mass.Mul(fixed.F(100)).ToInt()),
+			PosX:        quantPos(p.Pos.X),
+			PosY:        quantPos(p.Pos.Y),
+			Aim:         quantAngle(p.Aim),
+			Mass:        ratios[i],
 			StateFlags:  stateFlags(g, i),
 			HP:          uint8(p.HP),
 			DeathCount:  uint8(p.DeathCount),

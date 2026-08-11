@@ -190,7 +190,9 @@ func TestFullMatchFlow(t *testing.T) {
 		sx := binary.LittleEndian.Uint16(body[off:])
 		sy := binary.LittleEndian.Uint16(body[off+2:])
 		off += 4
-		if pid != uint8(i+1) || sx != 2450 && sx != 7250 || sy != 2450 && sy != 7250 {
+		// 出生点 = 格心世界坐标 × 64（T0001M01F03 定点 1/64）：
+		// 格 24 → 世界 12.25 → 784；格 72 → 世界 36.25 → 2320。
+		if pid != uint8(i+1) || sx != 784 && sx != 2320 || sy != 784 && sy != 2320 {
 			t.Fatalf("MatchStart player %d mismatch: pid=%d spawn=(%d,%d)", i, pid, sx, sy)
 		}
 	}
